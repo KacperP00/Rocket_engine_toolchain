@@ -1,2 +1,5 @@
-workdir/*
+*.dat
+*.csv
+*.png
 results/*
+workdir/*
