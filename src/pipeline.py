@@ -2,8 +2,7 @@ import os
 import sys
 import csv
 import time
-import datetime
-from datetime import datetime
+from datetime import datetime, timedelta
 from cfd.postprocessing import generate_validation_plots
 
 start_time = time.time()
@@ -67,13 +66,13 @@ def main():
 
     # 4. Postprocessing
     results_dir = os.path.abspath(os.path.join(root_dir, 'results'))
-    generate_validation_plots(workdir, results_dir)
+    generate_validation_plots(workdir, results_dir, chamber_data)
     
     print("=== SYMULACJA ZAKOŃCZONA ===")
     print(f"Wyniki CFD (.vtk) znajdują się w folderze: {workdir}")
 
     elapsed_time = time.time() - start_time
-    formatted_time = str(datetime.timedelta(seconds=int(elapsed_time)))
+    formatted_time = str(timedelta(seconds=int(elapsed_time)))
     print(f"--- Czas całkowity: {formatted_time} ---")
 
 if __name__ == "__main__":

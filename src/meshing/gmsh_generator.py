@@ -75,7 +75,9 @@ def generate_nozzle_mesh():
     print("-------------------------------------------------------------\n")
     
     # Możesz to odkomentować, żeby aplikacja otworzyła się w oknie graficznym
-    gmsh.fltk.run() 
+    if input("Do You want to see the mesh in GMSH GUI? (y/n): ").lower() == 'y':
+        gmsh.fltk.run()
+    
     
     gmsh.finalize()
     
