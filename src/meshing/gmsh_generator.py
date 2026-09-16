@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 import config
 
 def generate_nozzle_mesh():
-    print("--- [MODUŁ GMSH] Generowanie wygładzonej siatki CFD 2D ---")
+    print("--- [MODUŁ GMSH] Generowanie analitycznej geometrii dyszy de Lavala ---")
     
     workdir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../workdir'))
     os.makedirs(workdir, exist_ok=True)
@@ -15,43 +15,54 @@ def generate_nozzle_mesh():
     R_t = config.THROAT_RADIUS
     R_e = R_t * math.sqrt(config.EXPANSION_RATIO)
     L_d = config.NOZZLE_LENGTH
-    
     R_c = R_t * 2.0
     L_c = 0.1
     
     gmsh.initialize()
-    gmsh.model.add("Rocket_Nozzle_Smooth")
+    gmsh.model.add("Rocket_Nozzle_Analytical")
     
-    lc = 0.004  # Nieco gęstsza siatka dla lepszej rozdzielczości gardła
-
-    # Oś symetrii (dół)
-    p1 = gmsh.model.geo.addPoint(-L_c, 0, 0, lc)
-    p2 = gmsh.model.geo.addPoint(0, 0, 0, lc/2)
-    p3 = gmsh.model.geo.addPoint(L_d, 0, 0, lc)
+    # Bazowy rozmiar elementu dla uproszczonego modelu
+    lc = 0.004
     
-    # Profil ścianki górnej z punktami pośrednimi dla gładkiego przejścia (Spline)
-    p_inlet = gmsh.model.geo.addPoint(-L_c, R_c, 0, lc)
-    p_mid_conv = gmsh.model.geo.addPoint(-0.05, 0.5 * (R_c + R_t), 0, lc)
-    p_throat = gmsh.model.geo.addPoint(0, R_t, 0, lc/4)  # Gardło - zagęszczenie
-    p_mid_div = gmsh.model.geo.addPoint(L_d * 0.5, 0.5 * (R_t + R_e), 0, lc)
-    p_outlet = gmsh.model.geo.addPoint(L_d, R_e, 0, lc)
+    # Punkty węzłowe osi symetrii
+    p_sym_in = gmsh.model.geo.addPoint(-L_c, 0, 0, lc)
+    p_sym_th = gmsh.model.geo.addPoint(0, 0, 0, lc/2)
+    p_sym_out = gmsh.model.geo.addPoint(L_d, 0, 0, lc)
     
-    # Tworzenie gładkiej krzywej ścianki za pomocą B-Spline
-    l_wall = gmsh.model.geo.addSpline([p_inlet, p_mid_conv, p_throat, p_mid_div, p_outlet])
+    wall_points = []
+    num_points_conv = 20
+    num_points_div = 40
     
-    # Domknięcie pozostałych krawędzi domeny
-    l_inlet = gmsh.model.geo.addLine(p1, p_inlet)
-    l_outlet = gmsh.model.geo.addLine(p_outlet, p3)
-    l_sym_div = gmsh.model.geo.addLine(p3, p2)
-    l_sym_conv = gmsh.model.geo.addLine(p2, p1)
+    # Generowanie trygonometrycznego profilu sekcji zbieżnej
+    for i in range(num_points_conv):
+        x = -L_c + (L_c / num_points_conv) * i
+        y = R_t + 0.5 * (R_c - R_t) * (1.0 - math.cos(math.pi * abs(x) / L_c))
+        wall_points.append(gmsh.model.geo.addPoint(x, y, 0, lc))
+        
+    # Punkt kontrolny gardła dyszy
+    wall_points.append(gmsh.model.geo.addPoint(0, R_t, 0, lc/4))
     
-    # Pętla i powierzchnia płynu
+    # Generowanie trygonometrycznego profilu sekcji rozbieżnej
+    for i in range(1, num_points_div + 1):
+        x = (L_d / num_points_div) * i
+        y = R_t + 0.5 * (R_e - R_t) * (1.0 - math.cos(math.pi * x / L_d))
+        wall_points.append(gmsh.model.geo.addPoint(x, y, 0, lc))
+        
+    # Definicja ciągłej krzywej ściennej
+    l_wall = gmsh.model.geo.addSpline(wall_points)
+    
+    # Zamykanie obwiedni domeny obliczeniowej
+    l_inlet = gmsh.model.geo.addLine(p_sym_in, wall_points[0])
+    l_outlet = gmsh.model.geo.addLine(wall_points[-1], p_sym_out)
+    l_sym_div = gmsh.model.geo.addLine(p_sym_out, p_sym_th)
+    l_sym_conv = gmsh.model.geo.addLine(p_sym_th, p_sym_in)
+    
+    # Generowanie powierzchni płynu
     loop = gmsh.model.geo.addCurveLoop([l_inlet, l_wall, l_outlet, l_sym_div, l_sym_conv])
     surface = gmsh.model.geo.addPlaneSurface([loop])
-    
     gmsh.model.geo.synchronize()
     
-    # Grupy fizyczne dla SU2
+    # Mapowanie grup geometrycznych na markery brzegowe SU2
     gmsh.model.addPhysicalGroup(1, [l_inlet], name="MARKER_INLET")
     gmsh.model.addPhysicalGroup(1, [l_outlet], name="MARKER_OUTLET")
     gmsh.model.addPhysicalGroup(1, [l_wall], name="MARKER_WALL")
@@ -59,13 +70,10 @@ def generate_nozzle_mesh():
     gmsh.model.addPhysicalGroup(2, [surface], name="FLUID_DOMAIN")
     
     gmsh.model.mesh.generate(2)
-    
     mesh_path = os.path.join(workdir, "nozzle.su2")
     gmsh.write(mesh_path)
     
-    print(f"Wygładzona siatka wygenerowana: {mesh_path}")
-    print("-------------------------------------------------------------\n")
-    
+    print(f"Analityczna siatka wygenerowana: {mesh_path}")
     gmsh.finalize()
     return mesh_path
 
