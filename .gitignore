@@ -2,7 +2,7 @@
 *.csv
 *.png
 results/*
-workdir/*git 
+workdir/* 
 *.cfg
 *.12d
 *.cvg
