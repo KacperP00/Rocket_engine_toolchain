@@ -3,3 +3,14 @@
 *.png
 results/*
 workdir/*git 
+*.cfg
+*.12d
+*.cvg
+*.frd
+*.inp
+*.sta
+*.su2
+*.log
+*.vtu
+*.png
+__pycache__ 

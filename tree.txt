@@ -1,0 +1,66 @@
+franek@Franek:~/Projects/portfolio/Rocket_engine_toolchain$ tree
+.
+├── README.md
+├── __pycache__
+│   └── config.cpython-310.pyc
+├── config.py
+├── requirements.txt
+├── results
+│   ├── plot_convergence.png
+│   ├── plot_nozzle_flow.png
+│   ├── plot_nozzle_flow_2x2.png
+│   ├── plot_nozzle_flow_idealized_complete.png
+│   ├── run_history.csv
+│   ├── validation_metrics.csv
+│   └── validation_metrics_idealized_complete.csv
+├── src
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   └── diagnostics.cpython-310.pyc
+│   ├── cfd
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-310.pyc
+│   │   │   ├── postprocessing.cpython-310.pyc
+│   │   │   └── su2_runner.cpython-310.pyc
+│   │   ├── postprocessing.py
+│   │   ├── su2_runner.py
+│   │   └── templates
+│   │       └── base_config.cfg
+│   ├── chemistry
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-310.pyc
+│   │   │   └── cantera_solver.cpython-310.pyc
+│   │   └── cantera_solver.py
+│   ├── diagnostics.py
+│   ├── fea
+│   │   ├── __init__,py
+│   │   └── calculix_runner.py
+│   ├── meshing
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-310.pyc
+│   │   │   └── gmsh_generator.cpython-310.pyc
+│   │   └── gmsh_generator.py
+│   └── pipeline.py
+└── workdir
+    ├── develop_report.log
+    ├── develop_sim_out.csv
+    ├── flow.vtu
+    ├── history.csv
+    ├── history_01.csv
+    ├── history_02.csv
+    ├── nozzle.su2
+    ├── restart.dat
+    ├── run.cfg
+    ├── solution.dat
+    ├── solution_flow.dat
+    ├── surface_flow.csv
+    ├── surface_flow_01.csv
+    ├── surface_flow_02.csv
+    ├── t_norst.cfg
+    ├── t_ns.cfg
+    └── t_planar.cfg
+
+13 directories, 49 files
