@@ -178,3 +178,194 @@ def verify_momentum_balance(workdir, cantera_data, log_file=None):
     if log_file:
         with open(log_file, 'a', encoding='utf-8') as f:
             f.write(msg + "\n")
+
+def verify_heat_transfer(workdir, results_dir, cantera_data, wall_temp=800.0, log_file=None):
+    # Obliczenie strumienia ciepla z warstwy przysciennej (laminarny + turbulentny SST) i walidacja wzorem Bartza
+    surf_path = os.path.join(workdir, 'surface_flow.csv')
+    vol_path = os.path.join(workdir, 'restart.csv')
+    if not os.path.exists(surf_path) or not os.path.exists(vol_path):
+        return None
+
+    df_surf = pd.read_csv(surf_path)
+    df_surf.columns = df_surf.columns.str.strip().str.replace('"', '')
+    df_surf = df_surf.sort_values('x').reset_index(drop=True)
+
+    df_vol = pd.read_csv(vol_path)
+    df_vol.columns = df_vol.columns.str.strip().str.replace('"', '')
+
+    gamma = cantera_data['gamma']
+    R_gas = cantera_data['R']
+    mu_c = cantera_data['mu']
+    Pr_c = cantera_data['Pr']
+    Pr_turb = 0.90
+    T_c = cantera_data['T_c']
+    p_c = cantera_data['p_c']
+    cp_c = cantera_data.get('cp', gamma * R_gas / (gamma - 1.0))
+    k_lam_su2 = mu_c * cp_c / Pr_c
+
+    # Obliczenie temperatury statycznej, calkowitej oraz lepkosci wirowej SST w domenie
+    rho_v = df_vol['Density'].values
+    v2_v = (df_vol['Momentum_x'].values / rho_v)**2 + (df_vol['Momentum_y'].values / rho_v)**2
+    p_v = (gamma - 1.0) * (df_vol['Energy'].values - 0.5 * rho_v * v2_v)
+    df_vol['Temp'] = p_v / (rho_v * R_gas)
+    df_vol['Temp_Tot'] = df_vol['Temp'] + 0.5 * v2_v / cp_c
+    df_vol['mu_t'] = rho_v * df_vol['Turb_Kin_Energy'].values / np.maximum(df_vol['Omega'].values, 1e-10)
+
+    q_cfd = []
+    for _, w_row in df_surf.iterrows():
+        xw, yw = w_row['x'], w_row['y']
+        tw_act = (gamma - 1.0) * w_row['Energy'] / (w_row['Density'] * R_gas)
+
+        dx = df_vol['x'].values - xw
+        dy = df_vol['y'].values - yw
+        dist = np.sqrt(dx**2 + dy**2)
+
+        near = df_vol[(dist > 1e-7) & (dist < 0.0035)].copy()
+        near['dn'] = dist[(dist > 1e-7) & (dist < 0.0035)]
+        near = near.sort_values('dn')
+        r1 = near.iloc[0]
+        nx = (r1['x'] - xw) / r1['dn']
+        ny = (r1['y'] - yw) / r1['dn']
+
+        # Ekstrakcja wezlow lezacych wzdluz promienia normalnego do scianki
+        cross = np.abs((near['x'] - xw) * ny - (near['y'] - yw) * nx)
+        ray = near[cross < 1e-5].sort_values('dn').reset_index(drop=True)
+
+        dn_ray = np.insert(ray['dn'].values, 0, 0.0)
+        Ttot_ray = np.insert(ray['Temp_Tot'].values, 0, tw_act)
+        mut_ray = np.insert(ray['mu_t'].values, 0, 0.0)
+
+        keff_ray = k_lam_su2 + mut_ray * cp_c / Pr_turb
+        q_tot_ray = keff_ray * np.gradient(Ttot_ray, dn_ray)
+
+        log_mask = (dn_ray >= 1.5e-4) & (dn_ray <= 2.5e-3)
+        q_val = np.max(q_tot_ray[log_mask]) if np.any(log_mask) else np.max(q_tot_ray)
+        q_cfd.append(max(q_val, 0.0))
+
+    q_cfd = np.array(q_cfd)
+
+    # Wytlumienie osobliwosci naroznej na styku wlotu ze scianka (x < -0.080 m)
+    idx_ref = np.argmin(np.abs(df_surf['x'].values - (-0.075)))
+    q_cfd[df_surf['x'].values < -0.075] = q_cfd[idx_ref]
+
+    # Korelacja analityczna Bartza wzdluz osi dyszy
+    r_w = df_surf['y'].values
+    r_t = np.min(r_w)
+    D_t = 2.0 * r_t
+    c_star = np.sqrt(R_gas * T_c / gamma) * ((gamma + 1.0) / 2.0)**((gamma + 1.0) / (2.0 * (gamma - 1.0)))
+    r_rec = Pr_c**(1.0 / 3.0)
+
+    from scipy.optimize import fsolve
+    def area_eq(M, ar):
+        return (1.0 / M) * ((2.0 / (gamma + 1.0)) * (1.0 + 0.5 * (gamma - 1.0) * M**2))**((gamma + 1.0) / (2.0 * (gamma - 1.0))) - ar
+
+    x_throat = df_surf.loc[df_surf['y'].idxmin(), 'x']
+    q_bartz = []
+    for _, row in df_surf.iterrows():
+        ar = max((row['y'] / r_t)**2, 1.0)
+        if ar < 1.0001:
+            M_loc = 1.0
+        else:
+            guess = 2.5 if row['x'] > x_throat else 0.15
+            M_loc = abs(fsolve(area_eq, guess, args=(ar,))[0])
+        term = 1.0 + 0.5 * (gamma - 1.0) * M_loc**2
+        sigma = (0.5 * (wall_temp / T_c) * term + 0.5)**(-0.68) * (term)**(-0.12)
+        h_g = (0.026 / (D_t**0.2)) * ((mu_c**0.2) * cp_c / (Pr_c**0.6)) * ((p_c / c_star)**0.8) * ((1.0 / ar)**0.9) * sigma
+        T_aw = T_c * (1.0 + r_rec * 0.5 * (gamma - 1.0) * M_loc**2) / term
+        q_bartz.append(h_g * (T_aw - wall_temp))
+
+    q_bartz = np.array(q_bartz)
+
+    df_surf['Heat_Flux_CFD'] = q_cfd
+    df_surf['Heat_Flux_Bartz'] = q_bartz
+    df_surf.to_csv(os.path.join(workdir, 'wall_thermal_loads.csv'), index=False)
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(df_surf['x'], q_bartz / 1e6, 'k--', linewidth=1.5, label='Korelacja Bartza (1D) [MW/m^2]')
+    plt.plot(df_surf['x'], q_cfd / 1e6, 'r-', linewidth=2.0, label='SU2 RANS (Warstwa przyścienna) [MW/m^2]')
+    plt.xlabel('Oś X [m]')
+    plt.ylabel('Gęstość strumienia ciepła [MW/m^2]')
+    plt.title(f'Walidacja wymiany ciepła na ściance (T_w = {wall_temp:.0f} K)')
+    plt.grid(True, ls='--')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'plot_wall_heat_flux.png'), dpi=300)
+    plt.close()
+
+    throat_mask = np.abs(df_surf['x'].values) < 0.02
+    q_th_cfd = np.max(q_cfd[throat_mask])
+    q_th_bartz = np.max(q_bartz[throat_mask])
+    err_q = abs(q_th_cfd - q_th_bartz) / q_th_bartz * 100.0
+    msg = f"[WALIDACJA CIEPLNA] Strumien ciepla w gardle -> CFD: {q_th_cfd/1e6:.2f} MW/m^2 | Bartz: {q_th_bartz/1e6:.2f} MW/m^2 | Blad: {err_q:.2f}%"
+    print(msg)
+    if log_file:
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(msg + "\n")
+    return q_cfd
+
+def verify_flow_separation(workdir, results_dir, cantera_data, log_file=None):
+    # Detekcja punktu oderwania warstwy przysciennej i walidacja kryterium Schmuckera
+    import config
+    from scipy.optimize import fsolve
+    p_amb = getattr(config, 'AMBIENT_PRESSURE', 0.0)
+    if p_amb <= 1.0:
+        return
+
+    surf_path = os.path.join(workdir, 'surface_flow.csv')
+    if not os.path.exists(surf_path):
+        return
+
+    df_surf = pd.read_csv(surf_path)
+    df_surf.columns = df_surf.columns.str.strip().str.replace('"', '')
+    df_surf = df_surf.sort_values('x').reset_index(drop=True)
+
+    gamma = cantera_data['gamma']
+    p_c = cantera_data['p_c']
+    rho = df_surf['Density'].values
+    v2 = (df_surf['Momentum_x'].values / rho)**2 + (df_surf['Momentum_y'].values / rho)**2
+    p_wall = (gamma - 1.0) * (df_surf['Energy'].values - 0.5 * rho * v2)
+    x_w = df_surf['x'].values
+    r_w = df_surf['y'].values
+
+    # Punkt oderwania w CFD: minimum cisnienia statycznego przed skokiem na fali uderzeniowej (dla x > 0)
+    div_mask = x_w > 0.02
+    idx_sep_cfd = np.argmin(p_wall[div_mask]) + np.sum(~div_mask)
+    x_sep_cfd = x_w[idx_sep_cfd]
+    p_sep_cfd = p_wall[idx_sep_cfd]
+
+    # Kryterium Schmuckera: p_sep / p_a = (1.88 * M_sep - 1)^(-0.64)
+    def area_ratio(M):
+        return (1.0 / M) * ((2.0 / (gamma + 1.0)) * (1.0 + 0.5 * (gamma - 1.0) * M**2))**((gamma + 1.0) / (2.0 * (gamma - 1.0)))
+
+    def p_iso(M):
+        return p_c * (1.0 + 0.5 * (gamma - 1.0) * M**2)**(-gamma / (gamma - 1.0))
+
+    M_sch = fsolve(lambda M: (p_iso(M) / p_amb) - (1.88 * M - 1.0)**(-0.64), 2.8)[0]
+    ar_sch = area_ratio(M_sch)
+    r_t = np.min(r_w)
+    r_sch = r_t * np.sqrt(ar_sch)
+    x_sep_sch = np.interp(r_sch, r_w[div_mask], x_w[div_mask])
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(x_w, p_wall / 1e5, 'b-', linewidth=2.0, label='Ciśnienie na ściance CFD [bar]')
+    plt.axhline(y=p_amb / 1e5, color='k', linestyle=':', label='Ciśnienie otoczenia (1 atm)')
+    plt.axvline(x=x_sep_cfd, color='r', linestyle='--', label=f'Oderwanie CFD (x = {x_sep_cfd:.3f} m)')
+    plt.axvline(x=x_sep_sch, color='g', linestyle='-.', label=f'Wzór Schmuckera (x = {x_sep_sch:.3f} m)')
+    plt.xlabel('Oś X [m]')
+    plt.ylabel('Ciśnienie [bar]')
+    plt.title('Oderwanie warstwy przyściennej i fala uderzeniowa w dyszy (Poziom Morza)')
+    plt.grid(True, ls='--')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'plot_flow_separation.png'), dpi=300)
+    plt.close()
+
+    err_sep = abs(x_sep_cfd - x_sep_sch) / x_sep_sch * 100.0
+    msg = (
+        f"[WALIDACJA ODERWANIA] Punkt oderwania -> CFD: x = {x_sep_cfd:.3f} m (p = {p_sep_cfd:.0f} Pa) | "
+        f"Schmucker: x = {x_sep_sch:.3f} m | Blad pozycji: {err_sep:.2f}%"
+    )
+    print(msg)
+    if log_file:
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(msg + "\n")

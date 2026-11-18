@@ -1,5 +1,7 @@
 import os
 import subprocess
+import config
+
 
 def prepare_su2_config(cantera_data, workdir):
     print("--- [MODUŁ SU2] Generowanie pliku konfiguracyjnego CFD ---")
@@ -15,6 +17,17 @@ def prepare_su2_config(cantera_data, workdir):
     config_content = config_content.replace('{R}', f"{cantera_data['R']:.2f}")
     config_content = config_content.replace('{T_C}', f"{cantera_data['T_c']:.2f}")
     config_content = config_content.replace('{P_C}', f"{cantera_data['p_c']:.2f}")
+    config_content = config_content.replace('{T_WALL}', f"{config.WALL_TEMP:.2f}")
+    p_amb = getattr(config, 'AMBIENT_PRESSURE', 0.0)
+    if p_amb > 1.0:
+        config_content = config_content.replace(
+            "MARKER_SUPERSONIC_OUTLET= ( MARKER_OUTLET )",
+            f"MARKER_OUTLET= ( MARKER_OUTLET, {p_amb:.2f} )"
+        )
+        config_content = config_content.replace(
+            "FREESTREAM_PRESSURE= 10000.0",
+            f"FREESTREAM_PRESSURE= {p_amb:.2f}"
+        )
     
     # Parametry transportowe dla modelu RANS (w solverze EULER ignorowane fizycznie)
     if 'mu' in cantera_data:

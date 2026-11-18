@@ -158,13 +158,16 @@ def run_automated_toolchain():
 
     run_stage(["SU2_CFD", "run.cfg"], workdir, "RANS_2ND_ORDER", log_file)
 
-    # 6. Diagnostyka i Postprocessing
+    
+
     if DEVELOP_MODE:
         extract_probe_data(workdir, "RANS_2ND_ORDER", probe_file, cantera_data)
         diagnostics.verify_mass_balance(workdir, log_file)
         diagnostics.verify_momentum_balance(workdir, cantera_data, log_file)
-        diagnostics.verify_y_plus(workdir, log_file)
+        diagnostics.verify_y_plus(workdir, log_file, mu_val=cantera_data['mu'])
+        diagnostics.verify_heat_transfer(workdir, results_dir, cantera_data, log_file=log_file)
         diagnostics.plot_convergence(workdir, log_file)
+        diagnostics.verify_flow_separation(workdir, results_dir, cantera_data, log_file=log_file)
 
     postprocessing.generate_validation_plots(workdir, results_dir, cantera_data)
 

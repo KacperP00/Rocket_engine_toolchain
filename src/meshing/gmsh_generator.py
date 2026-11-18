@@ -70,8 +70,8 @@ def generate_nozzle_mesh():
     # ze współczynnikiem 1.2, aby warstwa miała się do czego przyczepić".
     gmsh.model.mesh.field.setNumbers(bl_field, "PointsList", [p_inlet_top, p_outlet_top])
     
-    gmsh.model.mesh.field.setNumber(bl_field, "Size", 1e-5)       # Grubość pierwszej komórki
-    gmsh.model.mesh.field.setNumber(bl_field, "Ratio", 1.2)       # Przyrost objętości
+    gmsh.model.mesh.field.setNumber(bl_field, "Size", 1.5e-6)     # Grubosc pierwszej komorki pod y+ <= 1
+    gmsh.model.mesh.field.setNumber(bl_field, "Ratio", 1.15)      # Lagodniejszy przyrost objetosci
     gmsh.model.mesh.field.setNumber(bl_field, "Thickness", 0.005) # Całkowita grubość wytłoczenia
     gmsh.model.mesh.field.setNumber(bl_field, "Quads", 1)
     
