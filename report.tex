@@ -1,0 +1,412 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{float}
+\usepackage{hyperref}
+
+\geometry{margin=2.4cm}
+
+\title{\textbf{Automated Multi-Physics Toolchain for Aerothermochemical, Regenerative Cooling, and Thermo-Structural Analysis of Supersonic Rocket Nozzles}}
+\author{Kacper Piechocki}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report documents the architecture, mathematical formulation, modeling assumptions, grid convergence verification, and end-to-end validation of an open-source, automated multi-physics engineering toolchain developed as an educational and portfolio project for liquid-propellant rocket nozzle design. The Python-orchestrated framework couples combustion equilibrium and transport modeling (Cantera), exact analytical Rao bell contour meshing (Gmsh), compressible Reynolds-Averaged Navier-Stokes (RANS) fluid dynamics with temperature-dependent viscosity (SU2), one-dimensional counter-flow regenerative cooling and channel hydraulics, and nonlinear elastoplastic Finite Element Analysis of a bimetallic nozzle liner (CalculiX). Demonstrated on a methane-oxygen ($\mathrm{CH_4/O_2}$) rocket nozzle operating at a chamber pressure of $20\,\mathrm{atm}$ and an area expansion ratio of $\varepsilon = 10$ under sea-level back-pressure, the fine-grid ($60{,}849$ nodes) solution achieves an inlet-to-throat mass conservation error of $0.91\%$, an axial momentum balance error of $0.19\%$, formal second-order Grid Convergence Index uncertainties of $\mathrm{GCI}_{\mathrm{fine}} = 0.23\%$ for mass flow rate and $0.21\%$ for vacuum thrust, peak throat heat flux agreement with the Bartz correlation within $14.81\%$, and overexpanded flow separation agreement within $12.91\%$ of the Schmucker criterion. Coupled 1D thermal-hydraulic cooling along $80$ variable-geometry channels predicts a supercritical methane temperature rise from $120.0\,\mathrm{K}$ to $385.1\,\mathrm{K}$ with a hydraulic pressure drop of $10.12\,\mathrm{bar}$ ($60.0 \to 49.9\,\mathrm{bar}$, preserving supercritical margin above $46.0\,\mathrm{bar}$) and a peak hot-wall temperature of $678.4\,\mathrm{K}$ ($504.1\,\mathrm{K}$ at the throat). Nonlinear bimetallic FEA ($\mathrm{CuCrZr}$ $1.0\,\mathrm{mm}$ liner + Inconel 718 $3.0\,\mathrm{mm}$ structural jacket) captures bounded thermal plastic shakedown ($\sigma_{\mathrm{VM,max}} = 306.5\,\mathrm{MPa}$, $\mathrm{PEEQ}_{\max} = 0.638\%$, estimated low-cycle fatigue life $\sim 720$ cycles), resolving the non-physical elastic stress overestimation observed in earlier monolithic shell models.
+\end{abstract}
+
+\section{System Architecture and Multi-Physics Workflow}
+
+Designing high-performance rocket engine nozzles requires capturing tightly coupled phenomena across combustion thermochemistry, compressible turbulent boundary layers, cryogenic regenerative cooling, and nonlinear structural mechanics. The developed Python orchestrator (\texttt{pipeline.py}) and verification suite (\texttt{gci\_study.py}) automate sequential execution and data transfer across five specialized computational modules:
+
+\begin{enumerate}
+    \item \textbf{Thermochemical and Transport Module (\texttt{cantera\_solver.py}):} Evaluates the adiabatic flame temperature, equilibrium species composition, and mixture-averaged transport properties in the combustion chamber using the GRI-Mech 3.0 reaction mechanism. It computes one-dimensional isentropic expansion profiles under both frozen-composition and shifting-equilibrium assumptions, evaluates molecular viscosity and thermal conductivity at the cooled wall temperature, and fits a two-point Sutherland viscosity constant ($S = 538.66\,\mathrm{K}$) tailored to $\mathrm{CH_4/O_2}$ exhaust gases.
+    \item \textbf{Exact Parametric Meshing Module (\texttt{gmsh\_generator.py}):} Constructs a two-dimensional axisymmetric hybrid grid directly from exact $C^1$-continuous Gmsh analytical primitives (lines, circular arcs, and a quadratic B\'ezier bell curve) for an 80\% Rao parabolic nozzle, eliminating spline-interpolation curvature oscillations. An unstructured Frontal-Delaunay triangular core with dual refinement boxes (throat curvature and divergent shock zone) is paired with a structured quadrilateral boundary-layer extrusion resolving $y^+_{\mathrm{mean}} < 1$.
+    \item \textbf{Compressible CFD Module (\texttt{su2\_runner.py}):} Solves the axisymmetric compressible RANS equations closed with Menter's two-equation $k$-$\omega$ SST turbulence model, AUSM convective fluxes, and Sutherland temperature-dependent viscosity and thermal conductivity. To prevent numerical divergence on sub-micron boundary-layer cells, the pipeline executes a two-stage continuation strategy: a first-order upwind initialization with adaptive Courant-Friedrichs-Lewy (CFL) time-stepping, followed by a second-order MUSCL reconstruction with Venkatakrishnan slope limiting.
+    \item \textbf{1D Regenerative Cooling and Hydraulics Module (\texttt{cooling\_1d.py}):} Integrates counter-flow supercritical methane heating and pressure drop along $80$ variable-geometry milled copper channels using NIST 50-bar supercritical $\mathrm{CH_4}$ properties (with optional CoolProp integration), the Haaland friction factor, the Gnielinski convective correlation corrected for copper rib fin efficiency ($\eta_f$), and Darcy-Weisbach plus differential flow-acceleration pressure losses, producing realistic axial profiles of $T_{\mathrm{cool}}(x)$, $p_{\mathrm{cool}}(x)$, $V_{\mathrm{cool}}(x)$, $T_{w,\mathrm{cold}}(x)$, and $T_{w,\mathrm{hot}}(x)$.
+    \item \textbf{Nonlinear Thermo-Structural FEA Module (\texttt{calculix\_runner.py}):} Reads the converged CFD differential wall pressure and 1D cooling temperature profiles, constructs a six-layer bimetallic axisymmetric solid-shell mesh ($4\times\mathrm{CAX4}$ $\mathrm{CuCrZr}$ hot liner + $2\times\mathrm{CAX4}$ cold Inconel 718 structural jacket) normal to the nozzle contour, and solves the nonlinear elastoplastic problem in CalculiX (\texttt{ccx}) using temperature-dependent elasticity and isotropic hardening (\texttt{*PLASTIC}).
+\end{enumerate}
+
+\section{Case Study Definition, Rao Bell Geometry, and Mesh Topology}
+
+The benchmark case represents a regeneratively cooled convergent-divergent rocket thruster operating on liquid methane and liquid oxygen ($\mathrm{CH_4/O_2}$) at an oxidizer-to-fuel mass ratio of $\mathrm{O/F} = 3.2$, chamber pressure $p_c = 2.0265\,\mathrm{MPa}$ ($20\,\mathrm{atm}$), throat radius $R_t = 0.050\,\mathrm{m}$, chamber inlet radius $R_c = 0.100\,\mathrm{m}$ ($\varepsilon_c = 4.0$), and exit radius $R_e = R_t\sqrt{10} = 0.15811\,\mathrm{m}$ ($\varepsilon = 10.0$).
+
+While initial toolchain verification employed a piecewise cosine contour (which introduced a discontinuous nine-fold jump in meridional curvature $d^2r/dx^2$ at the throat), the production geometry adopts an industry-standard \textbf{80\% Rao parabolic bell contour} defined piecewise by exact $C^1$-continuous segments over $x \in [-0.140, 0.3228]\,\mathrm{m}$:
+\begin{equation}
+r(x) = \begin{cases}
+R_c & \text{cylindrical chamber stub } (20\,\mathrm{mm}) \\
+R_c - R_f\left(1 - \cos\phi\right) & \text{inlet fillet arc, } R_f = 1.0\,R_t \\
+r_{\mathrm{cone}}(x) & 30^\circ\text{ convergent cone} \\
+R_t + R_u\left(1 - \cos\phi\right) & \text{upstream throat arc, } R_u = 1.5\,R_t \\
+R_t + R_d\left(1 - \cos\phi\right) & \text{downstream throat arc, } R_d = 0.382\,R_t,\; \phi \in [0, \theta_n] \\
+(1-u)^2 r_N + 2(1-u)u\,r_Q + u^2 R_e & \text{Rao quadratic B\'ezier bell, } u \in [0, 1]
+\end{cases}
+\end{equation}
+where the inflection point $N$ sits at $(x_N, r_N) = (0.0084, 0.0519)\,\mathrm{m}$ ($\theta_n = 26^\circ$), the tangent-intersection control point $Q$ lies at $(x_Q, r_Q) = (0.1620, 0.1269)\,\mathrm{m}$, and the exit lip $E$ lies at $(L_d, R_e) = (0.3228, 0.15811)\,\mathrm{m}$ with exit angle $\theta_e = 11^\circ$.
+
+\begin{table}[H]
+\centering
+\caption{Input parameters for the $\mathrm{CH_4/O_2}$ Rao bell rocket nozzle case study}
+\vspace{0.2cm}
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} \\
+\midrule
+Propellant combination and O/F ratio & -- & $\mathrm{CH_4 / O_2}$ ($\mathrm{O/F} = 3.2$) \\
+Chamber stagnation pressure and temperature & $p_c, T_c$ & $2.0265\,\mathrm{MPa}$ ($20\,\mathrm{atm}$), $3434.81\,\mathrm{K}$ \\
+Chamber specific heat ratio and gas constant & $\gamma, R$ & $1.2070$, $405.87\,\mathrm{J/(kg\cdot K)}$ \\
+Isobaric specific heat capacity and Prandtl number & $c_p, \mathrm{Pr}$ & $2366.6\,\mathrm{J/(kg\cdot K)}$, $0.5937$ \\
+Dynamic viscosity (chamber vs.\ $800\,\mathrm{K}$ wall) & $\mu_c, \mu_w$ & $1.0012\times 10^{-4}\,\mathrm{Pa\cdot s}$, $3.3404\times 10^{-5}\,\mathrm{Pa\cdot s}$ \\
+Fitted two-point Sutherland constant & $S$ & $538.66\,\mathrm{K}$ \\
+Thermal conductivity (chamber vs.\ $800\,\mathrm{K}$ wall) & $k_c, k_w$ & $0.3992\,\mathrm{W/(m\cdot K)}$, $0.1064\,\mathrm{W/(m\cdot K)}$ \\
+Throat radius, expansion ratio, bell length & $R_t, \varepsilon, L_d$ & $0.050\,\mathrm{m}$, $10.0$, $0.3228\,\mathrm{m}$ (80\% Rao) \\
+Rao inflection and exit lip angles & $\theta_n, \theta_e$ & $26.0^\circ$, $11.0^\circ$ ($\theta_{\mathrm{conv}} = 30.0^\circ$) \\
+Variable cooling channels ($80$ channels) & $w_{\mathrm{ch}}, h_{\mathrm{ch}}, \varepsilon_r$ & $w: 2.32\text{--}3.60\,\mathrm{mm}$, $h: 1.6\text{--}2.2\,\mathrm{mm}$, $\varepsilon_r = 5\,\mathrm{\mu m}$ \\
+Coolant inlet manifold (supercritical $\mathrm{CH_4}$) & $T_{\mathrm{cool,in}}, p_{\mathrm{cool,in}}$ & $120.0\,\mathrm{K}$, $60.0\,\mathrm{bar}$ (counter-flow from exit) \\
+Bimetallic wall thickness ($\mathrm{CuCrZr}$ + Inconel 718) & $t_{\mathrm{Cu}}, t_{\mathrm{Inc}}$ & $1.0\,\mathrm{mm}$ hot liner + $3.0\,\mathrm{mm}$ cold jacket \\
+$\mathrm{CuCrZr}$ elastic-thermal properties ($300\,\mathrm{K}$) & $E, \nu, \alpha_{\mathrm{th}}, k_s$ & $128\,\mathrm{GPa}$, $0.34$, $17\times 10^{-6}\,\mathrm{K^{-1}}$, $320\,\mathrm{W/(m\cdot K)}$ \\
+Inconel 718 structural jacket properties & $E_j, \nu_j, \alpha_j$ & $200\,\mathrm{GPa}$, $0.29$, $13\times 10^{-6}\,\mathrm{K^{-1}}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:geom_mesh} illustrates the exact axisymmetric Rao domain, boundary condition markers, bimetallic wall architecture, and the fine computational grid ($60{,}849$ nodes, $449$ wall boundary segments). To resolve the viscous and thermal sublayer under high-pressure throat conditions without relying on wall functions, the first cell height off the wall on the fine grid is set to $\Delta n_1 = 3.5\times 10^{-7}\,\mathrm{m}$ ($0.35\,\mathrm{\mu m}$) with a stretching ratio of $1.15$ across a $3.0\,\mathrm{mm}$ boundary-layer extrusion, yielding a domain-averaged dimensionless wall distance of $y^+_{\mathrm{mean}} = 0.418$ ($y^+_{\max} = 1.906$ locally at the throat, remaining strictly inside the viscous sublayer $y^+ < 5$).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.98\textwidth]{results/plot_geometry_mesh.png}
+\caption{Axisymmetric 80\% Rao bell nozzle geometry, boundary markers, bimetallic structural shell (top), and fine hybrid computational grid ($60{,}849$ nodes) with throat boundary-layer inset (bottom).}
+\label{fig:geom_mesh}
+\end{figure}
+
+\subsection{Modeling Assumptions, Consistency, and Engineering Scope}
+Because this framework is intended as a transparent educational and portfolio toolchain rather than a flight-qualification package, all simplifying physical assumptions across the coupled modules are documented explicitly in Table~\ref{tab:assumptions}. Each assumption was selected to balance physical fidelity against single-workstation turnaround time while preserving internal consistency across the workflow.
+
+\begin{table}[H]
+\centering
+\caption{Summary of physical modeling assumptions, engineering rationale, and known scope limitations}
+\label{tab:assumptions}
+\vspace{0.2cm}
+\small
+\begin{tabular}{p{2.5cm}p{5.5cm}p{6.6cm}}
+\toprule
+\textbf{Subsystem} & \textbf{Adopted Assumption} & \textbf{Rationale \& Known Limitation} \\
+\midrule
+Operating Point & $20\,\mathrm{atm}$, $\varepsilon = 10$ bell operated at sea level ($p_a = 1\,\mathrm{atm}$). & Deliberately overexpanded ($p_e/p_a \approx 0.24$) to benchmark shock separation; a dedicated sea-level engine at $20\,\mathrm{atm}$ would typically use $\varepsilon \approx 6\text{--}8$. \\
+Gas Chemistry & Frozen calorically perfect gas ($\gamma = 1.2070$, constant $c_p$) in SU2; Sutherland $\mu(T)$ and $k(T)$. & Keeps RANS runtime fast while capturing near-wall viscosity drop; Cantera shifting equilibrium bounds the omitted recombination gain ($\sim 84\,\mathrm{m/s}$). \\
+CFD Domain & Steady 2D axisymmetric RANS ($k$-$\omega$ SST), isothermal wall $T_w = 800\,\mathrm{K}$. & Accurately resolves mean flow, thrust, and separation position; cannot capture 3D unsteady separation side-loads. \\
+Thermal Coupling & One-way coupling: CFD $q(x)$ at $800\,\mathrm{K}$ drives 1D cooling and FEA without feeding $T_{w,\mathrm{hot}}(x)$ back to SU2. & Since $T_{\mathrm{aw}} \approx 3200\,\mathrm{K}$, cooler real walls ($250\text{--}678\,\mathrm{K}$) increase the true driving potential by $\sim 10\text{--}20\%$ (moderate conservative offset in the bell). \\
+Coolant Feed & Supercritical $\mathrm{CH_4}$ enters at $60\,\mathrm{bar}, 120\,\mathrm{K}$, exits at $49.9\,\mathrm{bar}, 385.1\,\mathrm{K}$; NIST 50-bar table with pressure-scaled $\rho$. & Avoids two-phase boiling ($p > 46\,\mathrm{bar}$); $30\,\mathrm{bar}$ excess above the $20\,\mathrm{bar}$ chamber matches an expander-cycle turbine drive or throttled test-stand feed. \\
+Structural Model & Continuous bonded bimetallic ring ($1\,\mathrm{mm}$ $\mathrm{CuCrZr}$ + $3\,\mathrm{mm}$ Inconel 718); jacket at $T_{\mathrm{cool}}(x)$; $T_{\mathrm{ref}} = 300\,\mathrm{K}$. & Captures bulk bimetallic thermal mismatch and pressure sharing; omits 3D channel-slot stress concentrations and internal coolant pressure (roof bending checked analytically at $\approx 38.2\,\mathrm{MPa}$). \\
+Plasticity \& LCF & Single monotonic thermal-mechanical step with isotropic hardening (\texttt{*PLASTIC}); Coffin-Manson applied to monotonic $\mathrm{PEEQ}$. & Provides an order-of-magnitude LCF shakedown indicator ($\sim 720$ cycles); full life prediction requires multi-cycle kinematic hardening and copper creep. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Grid Convergence Study and Compressible Gas Dynamics Analysis}
+
+\subsection{Governing Equations, Solver Stabilization, and ASME V\&V 20 GCI}
+The compressible RANS equations in axisymmetric conservation form are solved using the Advection Upstream Splitting Method (AUSM) for inviscid fluxes, weighted least-squares gradients for viscous and turbulent source terms, and Euler implicit local time-stepping. Two critical numerical findings shaped the stabilization of the solver:
+\begin{enumerate}
+    \item \textbf{Thermodynamic Initialization Conflict in SU2:} When switching to \texttt{SOLVER= RANS}, SU2 computes free-stream density by default from the reference Reynolds number ($\mathrm{Re} = 10^6$), which for $\mathrm{Ma}_\infty = 0.01$ artificially inflated the initial domain static pressure to $3.18\,\mathrm{MPa}$ (exceeding the $2.03\,\mathrm{MPa}$ chamber inlet pressure and causing immediate divergence). Enforcing \texttt{INIT\_OPTION= TD\_CONDITIONS} and \texttt{FREESTREAM\_OPTION= TEMPERATURE\_FS} restored physical initialization ($p_\infty = 101.325\,\mathrm{kPa}$, $T_\infty = 300\,\mathrm{K}$).
+    \item \textbf{Exact Primitives vs.\ Spline Ringing:} Constructing the Rao contour via a single cubic spline over unequally spaced throat points induced Runge curvature oscillations upstream of $x = 0$, triggering transonic micro-shocks on refined grids. Rebuilding the wall from exact Gmsh circular arcs and a quadratic B\'ezier curve eliminated these artifacts completely.
+\end{enumerate}
+
+To verify spatial grid independence according to the ASME V\&V 20 methodology, a three-level Grid Convergence Index (GCI) study was executed across \textit{Coarse} ($16{,}852$ nodes, $l_c = 4.5\,\mathrm{mm}$, $5{,}000$ Stage-2 iterations), \textit{Medium} ($31{,}480$ nodes, $l_c = 3.0\,\mathrm{mm}$, $7{,}000$ iterations), and \textit{Fine} ($60{,}849$ nodes, $l_c = 2.0\,\mathrm{mm}$, $10{,}000$ iterations, $\log_{10}(\mathrm{rms}[\rho]) = -4.55$) meshes, giving effective 2D refinement ratios $r_{32} = 1.367$ and $r_{21} = 1.390$. To avoid non-conservative uncertainty underestimation from numerical superconvergence, the apparent order $p$ is capped at the formal second-order MUSCL accuracy ($p \le 2.0$).
+
+\begin{table}[H]
+\centering
+\caption{Three-grid ASME V\&V 20 Grid Convergence Index (GCI) verification summary ($r_{32} = 1.367$, $r_{21} = 1.390$, capped at formal order $p \le 2.0$)}
+\label{tab:gci}
+\vspace{0.2cm}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lllllllll}
+\toprule
+\textbf{Metric} & \textbf{Coarse} & \textbf{Medium} & \textbf{Fine} & \textbf{Ratio $R$} & \textbf{Regime} & $e_a^{21}$ & $\mathrm{GCI}_{\mathrm{fine}}$ & $f_{\mathrm{ext}}$ \\
+\midrule
+Mass flow $\dot{m}$ [kg/s] & $8.5888$ & $8.6680$ & $8.6830$ & $+0.190$ & Monotonic & $0.17\%$ & $0.23\%$ & $8.6885$ \\
+Vacuum thrust $F_{\mathrm{vac}}$ [kN] & $28.090$ & $27.905$ & $27.862$ & $+0.232$ & Monotonic & $0.15\%$ & $0.21\%$ & $27.847$ \\
+Throat flux $q_{\mathrm{th}}$ [MW/m$^2$] & $17.421$ & $16.540$ & $17.321$ & $-0.887$ & Osc.\ Conv. & $4.51\%$ & $14.51\%$ & $18.159$ \\
+Separation $x_{\mathrm{sep}}$ [m] & $0.2461$ & $0.2714$ & $0.2596$ & $-0.466$ & Osc.\ Conv. & $4.54\%$ & $14.61\%$ & $0.2470$ \\
+Total heat $Q_{\mathrm{tot}}$ [MW] & $2.700$ & $2.456$ & $2.008$ & $+1.835$ & Non-Asymp. & $22.30\%$ & $71.71\%$ & $1.528$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Global aerodynamic integrals ($\dot{m}$ and $F_{\mathrm{vac}}$) exhibit strict monotonic convergence with negligible fine-grid uncertainties ($\mathrm{GCI}_{\mathrm{fine}} \le 0.23\%$, $F_s = 1.25$). Turbulence- and shock-sensitive metrics ($q_{\mathrm{th}}$ and $x_{\mathrm{sep}}$) display damped oscillatory convergence ($|R| < 1$, conservative $F_s = 3.0$), with Richardson extrapolation shifting both values closer to their empirical standards ($q_{\mathrm{ext}} = 18.16\,\mathrm{MW/m^2}$ toward Bartz $20.33\,\mathrm{MW/m^2}$, and $x_{\mathrm{sep,ext}} = 0.247\,\mathrm{m}$ toward Schmucker $0.230\,\mathrm{m}$). Total wall heat load $Q_{\mathrm{tot}}$ remains outside the asymptotic range because finer divergent-wall resolution sharpens post-throat relaminarization and the large-radius separated shear layer, progressively lowering integrated heat transfer.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.98\textwidth]{results/plot_2d_contours.png}
+\caption{Converged fine-grid 2D axisymmetric RANS flowfield: Mach number contours in the upper half and static temperature contours in the lower half, showing the curved throat sonic line, centerline over-expansion, and sea-level separation shear layer.}
+\label{fig:contours_2d}
+\end{figure}
+
+\subsection{Centerline Validation and Shifting vs.\ Frozen Chemistry}
+Figure~\ref{fig:contours_2d} presents the converged two-dimensional Mach number and static temperature fields across the Rao nozzle, while Figure~\ref{fig:centerline_2x2} compares the centerline profiles ($r = 0$) against two one-dimensional analytical references:
+\begin{enumerate}
+    \item \textbf{Frozen Isentropic Expansion ($\gamma = 1.2070$):} Assumes fixed chemical composition equal to that of the combustion chamber. At $\varepsilon = 10$, 1D frozen theory predicts $V_e = 2937.44\,\mathrm{m/s}$, $\mathrm{Ma}_e = 3.2985$, $T_e = 1618.83\,\mathrm{K}$, and $p_e = 24.45\,\mathrm{kPa}$. In earlier vacuum baseline testing on a smooth cosine nozzle, SU2 matched this 1D exit velocity within $0.01\%$ ($2937.14\,\mathrm{m/s}$, mass balance error $0.01\%$).
+    \item \textbf{Shifting Chemical Equilibrium (Cantera):} Enforces continuous Gibbs free energy minimization along the isentrope ($\mathrm{SP}$). As the gas expands and cools in the divergent section, dissociated radicals ($\mathrm{CO}, \mathrm{OH}, \mathrm{H}, \mathrm{O}$) exothermically recombine into $\mathrm{CO_2}$ and $\mathrm{H_2O}$, elevating exit static temperature to $\approx 2335\,\mathrm{K}$ at $\varepsilon = 10$ along the equilibrium branch (corresponding to an effective expansion exponent $\gamma_{\mathrm{eff}} \approx 1.104$ at the exit, compared to $1.207$ frozen), and reducing exit Mach number to $\approx 2.99$ due to the higher local speed of sound while increasing true exhaust velocity by $\sim 84\,\mathrm{m/s}$.
+\end{enumerate}
+
+On the 80\% Rao bell geometry, Figure~\ref{fig:centerline_2x2} reveals two strong two-dimensional gas-dynamic effects. First, meridional throat curvature bends the sonic line parabolically downstream so that $\mathrm{Ma} < 1$ on the centerline at $x = 0$, giving an inlet-to-throat mass conservation error of $0.91\%$ ($\dot{m}_{\mathrm{in}} = 8.6830\,\mathrm{kg/s}$ vs.\ interpolated throat $\dot{m}_{\mathrm{th}} = 8.7622\,\mathrm{kg/s}$) and a discharge coefficient of $C_d = \dot{m}_{\mathrm{in}}/\dot{m}_{\mathrm{ideal,1D}} = 8.6830 / 8.7605 = 0.9912$. Second, the aggressive $26^\circ$ Prandtl-Meyer expansion fan off the $0.382\,R_t$ throat arc accelerates the centerline core beyond the 1D average to $\mathrm{Ma}_{\mathrm{cl,exit}} \approx 4.00$ ($T_{\mathrm{stat}} \approx 1293\,\mathrm{K}$), balanced radially by compression waves turning the bell wall back to $\theta_e = 11^\circ$ and by the sea-level separation shock near the exit lip.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.98\textwidth]{results/plot_nozzle_flow_2x2.png}
+\caption{Centerline gas dynamics validation: comparison of fine-grid 2D SU2 RANS profiles against 1D frozen isentropic theory and Cantera shifting chemical equilibrium.}
+\label{fig:centerline_2x2}
+\end{figure}
+
+\section{Wall Heat Transfer and Sea-Level Flow Separation}
+
+\subsection{Turbulent Boundary-Layer Heat Flux and Post-Throat Relaminarization}
+In a compressible turbulent boundary layer modeled with $k$-$\omega$ SST and Sutherland-scaled molecular transport, the total wallward energy flux across the boundary layer is governed by the effective thermal conductivity:
+\begin{equation}
+q_{\mathrm{CFD}} = \left( k_{\mathrm{lam}}(T_w) + \frac{\mu_t c_p}{\mathrm{Pr}_t} \right) \frac{\partial T_0}{\partial n}, \qquad \mu_t = \rho \frac{k}{\omega}
+\end{equation}
+where $\mathrm{Pr}_t = 0.90$ and $T_0 = T + V^2/(2c_p)$ is the stagnation temperature. As shown in Figure~\ref{fig:heat_flux}, the fine-grid CFD heat flux peaks directly ahead of the throat at $17.32\,\mathrm{MW/m^2}$ (total integrated wall heat load $Q_{\mathrm{tot}} = 2.008\,\mathrm{MW}$), agreeing within $14.81\%$ of the 1D Bartz empirical correlation peak of $20.33\,\mathrm{MW/m^2}$:
+\begin{equation}
+q_{\mathrm{Bartz}}(x) = \left[ \frac{0.026}{D_t^{0.2}} \left( \frac{\mu_c^{0.2} c_p}{\mathrm{Pr}^{0.6}} \right) \left( \frac{p_c}{c^*} \right)^{0.8} \left( \frac{A_t}{A(x)} \right)^{0.9} \sigma(x) \right] \left( T_{\mathrm{aw}}(x) - T_w \right)
+\end{equation}
+This $14.81\%$ margin aligns with experimental rocket test data showing that 1D Bartz typically overpredicts cooled-wall throat heat flux by $10\text{--}20\%$. Moreover, immediately downstream of $x = 0$, the tight $0.382\,R_t$ expansion arc accelerates the near-wall flow rapidly enough to produce an acceleration parameter $K = (\nu / U^2)(dU/ds) \approx 4.01\times 10^{-6}$, exceeding the critical relaminarization threshold ($K_{\mathrm{crit}} \approx 3.0\times 10^{-6}$). The SST model captures this transient relaminarization dip ($4.9\,\mathrm{MW/m^2}$ at $x = 0.011\,\mathrm{m}$), subsequent turbulent re-transition along the straightening bell ($11.2\,\mathrm{MW/m^2}$ near $x = 0.065\,\mathrm{m}$), and a localized shock-foot heat flux spike ($3.7\,\mathrm{MW/m^2}$) at $x \approx 0.275\,\mathrm{m}$.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{results/plot_wall_heat_flux.png}
+\caption{Wall convective heat transfer validation against the 1D Bartz correlation ($T_w = 800\,\mathrm{K}$), capturing the throat peak ($17.32\,\mathrm{MW/m^2}$), post-throat relaminarization, and shock-foot impingement.}
+\label{fig:heat_flux}
+\end{figure}
+
+\subsection{Overexpanded Sea-Level Operation and Shock Separation}
+When operating at sea level ($p_a = 101{,}325\,\mathrm{Pa}$), the $\varepsilon = 10$ nozzle is severely overexpanded ($p_{e,\mathrm{vac}}/p_a = 0.241$). Imposing the back-pressure boundary condition \texttt{MARKER\_OUTLET} at $101{,}325\,\mathrm{Pa}$ causes wall static pressure to fall below ambient near $x = 0.13\,\mathrm{m}$ and induce boundary-layer separation at $x_{\mathrm{sep,CFD}} = 0.260\,\mathrm{m}$ ($p_{\mathrm{sep}} = 49.30\,\mathrm{kPa}$, Figure~\ref{fig:separation}), agreeing within $12.91\%$ of the empirical Schmucker criterion ($x_{\mathrm{sep,Sch}} = 0.230\,\mathrm{m}$):
+\begin{equation}
+\frac{p_{\mathrm{sep}}}{p_a} = \left(1.88\,\mathrm{Ma}_{\mathrm{sep}} - 1\right)^{-0.64}
+\end{equation}
+The integral control-volume axial momentum balance closes within $0.19\%$ ($F_{\mathrm{out,vac}} = 27.862\,\mathrm{kN}$ vs.\ $F_{\mathrm{in}} + F_{\mathrm{wall},x} = 27.915\,\mathrm{kN}$, corresponding to $I_{\mathrm{sp,vac}} = 327.2\,\mathrm{s}$). Subtracting the ambient pressure thrust loss $p_a A_e = 7.958\,\mathrm{kN}$ yields a sea-level net thrust of $F_{\mathrm{SL}} = 19.904\,\mathrm{kN}$ ($I_{\mathrm{sp,SL}} = 233.8\,\mathrm{s}$). While subsonic backflow recirculation at the separated outlet introduces a localized $5.55\%$ exit mass flux offset ($9.1646\,\mathrm{kg/s}$), core conservation between inlet and throat remains tightly bounded at $0.91\%$.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{results/plot_flow_separation.png}
+\caption{Overexpanded sea-level wall static pressure distribution and boundary-layer separation validation against the empirical Schmucker criterion ($x_{\mathrm{sep}} = 0.260\,\mathrm{m}$ vs.\ $0.230\,\mathrm{m}$).}
+\label{fig:separation}
+\end{figure}
+
+\section{1D Regenerative Cooling and Bimetallic Elastoplastic FEA}
+
+\subsection{Supercritical Methane Counter-Flow Cooling and Channel Hydraulics}
+To replace the simplified isothermal wall assumption in structural calculations and verify hydraulic feasibility, \texttt{cooling\_1d.py} marches counter-flow along $80$ variable-geometry milled copper channels (roughness $\varepsilon_r = 5\,\mathrm{\mu m}$) carrying the full methane fuel flow ($\dot{m}_{\mathrm{CH_4}} = 2.07\,\mathrm{kg/s}$) against the fine-grid CFD heat load ($Q_{\mathrm{tot}} = 2.008\,\mathrm{MW}$). Channel height tapers from $2.2\,\mathrm{mm}$ at both the exit and chamber inlet down to $1.6\,\mathrm{mm}$ at the throat to maximize convective cooling where heat flux peaks, while channel width scales with the local circumference from $2.32\,\mathrm{mm}$ at the throat up to a structural cap of $3.60\,\mathrm{mm}$ along both the convergent and divergent sections. Capping the width at $3.60\,\mathrm{mm}$ keeps local channel-roof bending stress under differential coolant pressure to $\approx 38.2\,\mathrm{MPa}$ (versus $>140\,\mathrm{MPa}$ for uncapped $7.25\,\mathrm{mm}$ exit channels) and maintains sufficient exit coolant velocity ($\approx 8\,\mathrm{m/s}$) to cool the separation shock foot.
+
+Using NIST 50-bar supercritical $\mathrm{CH_4}$ properties (accounting for the pseudocritical specific heat peak near $195\,\mathrm{K}$ and strong density drop upon heating), the Haaland friction factor, and the Gnielinski correlation enhanced by copper rib fin efficiency produces $h_{c,\mathrm{eff}} = 86{,}323\,\mathrm{W/(m^2\cdot K)}$ at the throat. As shown in Figure~\ref{fig:cooling}, supercritical methane enters at the nozzle exit at $120.0\,\mathrm{K}$ and $60.0\,\mathrm{bar}$, heats to $385.1\,\mathrm{K}$ ($\Delta T_{\mathrm{cool}} = 265.1\,\mathrm{K}$), and exits the cooling jacket at $49.9\,\mathrm{bar}$ ($\Delta p = 10.12\,\mathrm{bar}$, peak velocity $118.2\,\mathrm{m/s}$ upstream of the throat). Maintaining a $+3.91\,\mathrm{bar}$ ($+8.5\%$) margin above the methane critical pressure ($45.99\,\mathrm{bar}$) prevents film boiling, while the $\sim 30\,\mathrm{bar}$ surplus over chamber pressure ($20\,\mathrm{bar}$) is physically consistent with an expander-cycle turbine drive or a throttled test-stand manifold. Hot-wall temperatures remain at $504.1\,\mathrm{K}$ in the throat and peak at $678.4\,\mathrm{K}$ in the convergent chamber inlet where the coolant is warmest---preserving a $>120\,\mathrm{K}$ safety margin below the $\sim 800\,\mathrm{K}$ softening limit of $\mathrm{CuCrZr}$.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{results/plot_cooling_profile.png}
+\caption{1D counter-flow supercritical methane regenerative cooling along $80$ variable-geometry channels: bulk coolant, cold-wall, and hot-wall temperatures (top), and hydraulic static pressure ($60.0 \to 49.9\,\mathrm{bar}$, $\Delta p = 10.12\,\mathrm{bar}$) and coolant velocity profiles (bottom).}
+\label{fig:cooling}
+\end{figure}
+
+\subsection{Thermo-Structural FEA: From Elastic Benchmark to Bimetallic Plasticity}
+The FEA solver (\texttt{calculix\_runner.py}) was first verified in linear thermo-elastic mode on a monolithic $4.0\,\mathrm{mm}$ $\mathrm{CuCrZr}$ shell ($4\times\mathrm{CAX4}$ layers with two-point surface stress extrapolation) against analytical doubly-curved shell theory (Laplace-Young mechanical pressure + Lorenz-Timoshenko thermal bending):
+\begin{equation}
+\sigma_\phi^{\mathrm{tot}} = \frac{F_x(x)}{2\pi r t \cos\alpha} - \frac{E \alpha_{\mathrm{th}} \Delta T(x)}{2(1 - \nu)}, \qquad
+\sigma_\theta^{\mathrm{tot}} = R_2 \left( \frac{\Delta p(x)}{t} - \frac{\sigma_\phi^{\mathrm{mech}}(x)}{R_1} \right) - \frac{E \alpha_{\mathrm{th}} \Delta T(x)}{2(1 - \nu)}
+\end{equation}
+This baseline verification achieved a $2.54\%$ mean error under pure pressure loading (peak $40.77\,\mathrm{MPa}$) and a $2.17\%$ mean error under combined thermo-mechanical loading. Crucially, however, the monolithic $4.0\,\mathrm{mm}$ copper shell developed $\Delta T_{\max} = 281.85\,\mathrm{K}$ and elastic stresses of $442.1\,\mathrm{MPa}$---far exceeding the yield strength of $\mathrm{CuCrZr}$ at $800\,\mathrm{K}$ ($165\,\mathrm{MPa}$), proving that a thick single-material shell is structurally infeasible.
+
+To model a flight-representative chamber, the upgraded FEA module discretizes the $449$ fine-grid axial stations into a six-layer bimetallic shell ($2{,}694$ $\mathrm{CAX4}$ elements, $6{,}293$ equations): a thin $1.0\,\mathrm{mm}$ $\mathrm{CuCrZr}$ hot liner ($4$ layers) carrying the through-thickness thermal gradient ($\Delta T \approx 54\,\mathrm{K}$ at the throat) backed by a cold $3.0\,\mathrm{mm}$ Inconel 718 closeout jacket ($2$ layers) carrying over $82\%$ of the internal chamber pressure load. Temperature-dependent elasticity and isotropic hardening (\texttt{*PLASTIC}) for $\mathrm{CuCrZr}$ converged smoothly in $6$ Newton-Raphson increments ($2$ iterations per increment, $1.61\,\mathrm{s}$).
+
+As illustrated in Figure~\ref{fig:fea_stress}, thermal expansion mismatch between the warm $\mathrm{CuCrZr}$ liner and the stiffer, cooled Inconel 718 jacket induces localized compressive yielding primarily in the hot convergent chamber ($x < 0$) and the post-throat turbulent re-transition zone ($x \approx 0.065\,\mathrm{m}$). Peak equivalent von Mises stress reaches $306.5\,\mathrm{MPa}$ with a minimum yield-strength ratio of $\mathrm{FoS} = 0.97$ at $x = -0.095\,\mathrm{m}$ (where $T_{w,\mathrm{hot}} = 678.4\,\mathrm{K}$ and $R_{p0.2} \approx 210.6\,\mathrm{MPa}$) and a maximum Equivalent Plastic Strain of $\mathrm{PEEQ}_{\max} = 0.638\%$. Across the cooler aft bell ($x > 0.21\,\mathrm{m}$), plastic strain drops to $0.00\%$ except for a narrow $0.10\%$ spike at the separation shock foot ($x \approx 0.275\,\mathrm{m}$). This bounded yielding (\textit{plastic shakedown}, $\mathrm{PEEQ} < 1\%$) is characteristic of reusable liquid rocket chambers; applying an order-of-magnitude Coffin-Manson low-cycle fatigue estimate ($\varepsilon_f' \approx 0.25$, $c \approx -0.6$) for $\mathrm{CuCrZr}$ at $\Delta\varepsilon_p = 0.638\%$ predicts a fatigue life of $\sim 720$ hot-fire cycles.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{results/plot_fea_stress.png}
+\caption{Bimetallic elastoplastic FEA results ($\mathrm{CuCrZr}$ $1.0\,\mathrm{mm}$ + Inconel 718 $3.0\,\mathrm{mm}$) driven by the 1D variable-channel cooling profile: inner-wall von Mises stress versus temperature-dependent yield strength $R_{p0.2}(T_w)$ (top) and accumulated Equivalent Plastic Strain PEEQ (bottom).}
+\label{fig:fea_stress}
+\end{figure}
+
+\section{Summary of Validation Metrics and Conclusions}
+
+Table~\ref{tab:master_validation} separates the foundational analytical verification benchmarks (monolithic cosine baseline) from the final fine-grid multi-physics performance metrics achieved on the 80\% Rao bell case study.
+
+\begin{table}[H]
+\centering
+\caption{Master verification baselines and fine-grid engineering performance matrix of the toolchain}
+\label{tab:master_validation}
+\vspace{0.2cm}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lllll}
+\toprule
+\textbf{Domain} & \textbf{Validated Metric} & \textbf{Toolchain Result} & \textbf{Reference / Criterion} & \textbf{Error / Status} \\
+\midrule
+\multicolumn{5}{l}{\textit{Part A: Analytical Verification Baselines (Cosine Vacuum / Monolithic Elastic Shell)}} \\
+CFD (Vacuum) & Mass balance / Exit $V_e$ & $8.6412\,\mathrm{kg/s}$ / $2937.1\,\mathrm{m/s}$ & Inlet / 1D Isentropic & $0.01\%$ / $0.01\%$ \\
+FEA (Elastic) & Pressure / Thermo-elastic & $40.77$ / $442.1\,\mathrm{MPa}$ & Laplace-Young / L.-T. & $2.54\%$ / $2.17\%$ \\
+\midrule
+\multicolumn{5}{l}{\textit{Part B: Fine-Grid 80\% Rao Production Case ($60{,}849$ Nodes, Sea Level, Bimetallic Liner)}} \\
+CFD (Core) & Mass balance (Inlet--Throat) & $8.6830\,\mathrm{kg/s}$ & $8.7622\,\mathrm{kg/s}$ & $0.91\%$ \\
+CFD (Throat) & Discharge coefficient $C_d$ & $0.9912$ & $1.0000$ (1D Ideal) & $0.88\%$ \\
+CFD (SL) & Vacuum thrust balance $F_{\mathrm{vac}}$ & $27.862\,\mathrm{kN}$ & $27.915\,\mathrm{kN}$ (CV Sum) & $0.19\%$ \\
+CFD (GCI) & Aerodynamic uncertainty & $\dot{m}$, $F_{\mathrm{vac}}$ & ASME V\&V 20 ($p \le 2$) & $0.23\%$, $0.21\%$ \\
+CFD (SL) & Separation location $x_{\mathrm{sep}}$ & $0.260\,\mathrm{m}$ & $0.230\,\mathrm{m}$ (Schmucker) & $12.91\%$ \\
+CFD (Thermal) & Peak throat heat flux $q_{\max}$ & $17.32\,\mathrm{MW/m^2}$ & $20.33\,\mathrm{MW/m^2}$ (Bartz) & $14.81\%$ \\
+Cooling (1D) & $\Delta p$, $T_{\mathrm{cool,out}}$, Max $T_{w,\mathrm{hot}}$ & $10.12\,\mathrm{bar}$, $385.1 / 678.4\,\mathrm{K}$ & $p > 46\,\mathrm{bar}$, $T < 800\,\mathrm{K}$ & Safe Margin \\
+FEA (Plastic) & Max VM / Min FoS / PEEQ & $306.5\,\mathrm{MPa}$ / $0.97$ / $0.638\%$ & Shakedown ($<1\%$ PEEQ) & $\sim 720$ Cycles \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection*{Key Engineering Conclusions and Educational Takeaways}
+\begin{itemize}
+    \item \textbf{Geometric and Numerical Robustness:} Combining direct thermodynamic initialization (\texttt{TD\_CONDITIONS}), two-stage first/second-order RANS continuation, Sutherland gas transport, and exact analytical Gmsh primitives for an 80\% Rao bell eliminated transonic spline artifacts and achieved monotonic aerodynamic grid independence ($\mathrm{GCI}_{\mathrm{fine}} \le 0.23\%$).
+    \item \textbf{Thermochemical and Flow Physics Fidelity:} Coupling Cantera's shifting equilibrium model quantifies the thermal recovery of radical recombination in $\mathrm{CH_4/O_2}$ exhaust, while 2D axisymmetric RANS captures curved throat sonic lines, post-throat relaminarization ($K > 3\times 10^{-6}$), centerline over-expansion, and sea-level shock separation.
+    \item \textbf{Coupled Thermal-Hydraulic-Structural Design Drivers:} Integrating variable-geometry channel hydraulics ($\Delta p = 10.12\,\mathrm{bar}$, $p_{\min} = 49.9\,\mathrm{bar}$) with a bimetallic $\mathrm{CuCrZr}$/Inconel 718 elastoplastic shell illustrates the core trade-off of regenerative rocket chambers: capping channel width ($w \le 3.60\,\mathrm{mm}$) controls roof bending and aft-bell heating, while a thin $1.0\,\mathrm{mm}$ liner and cold structural closeout keep metal temperatures below $678.4\,\mathrm{K}$ and bound chamber plasticity to manageable low-cycle fatigue shakedown ($\mathrm{PEEQ} = 0.638\%$, $\sim 720$ cycles).
+    \item \textbf{Recommended Future Upgrades:} Closing the two-way thermal loop back into SU2 (via segmented wall markers), extending FEA to multi-cycle kinematic hardening with explicit 3D cooling-channel slots, and incorporating finite-rate chemistry (\texttt{SU2\_NEMO}) represent the primary next steps toward flight-hardware fidelity.
+\end{itemize}
+
+\appendix
+\section{Mathematical Formulation of Validation and Sub-Grid Models}
+\label{app:validation_models}
+
+This appendix provides a systematic summary of the analytical, empirical, and numerical reference models employed across the validation matrix (Table~\ref{tab:master_validation}) and coupled sub-modules, detailing their governing equations, physical assumptions, and range of applicability.
+
+\subsection{Quasi-One-Dimensional Isentropic Flow and Discharge Coefficient}
+The baseline gas-dynamic reference assumes steady, inviscid, adiabatic, and one-dimensional flow of a calorically perfect gas ($\gamma = \mathrm{const}$) with negligible radial velocity components. Along an isentrope ($s = \mathrm{const}$), the local Mach number $\mathrm{Ma}(x)$ is implicitly governed by the geometric area ratio $A(x)/A_t = (r(x)/R_t)^2$:
+\begin{equation}
+\frac{A(x)}{A_t} = \frac{1}{\mathrm{Ma}(x)} \left[ \frac{2}{\gamma + 1} \left( 1 + \frac{\gamma - 1}{2} \mathrm{Ma}(x)^2 \right) \right]^{\frac{\gamma + 1}{2(\gamma - 1)}}
+\end{equation}
+The theoretical choked mass flow rate $\dot{m}_{\mathrm{ideal,1D}}$ and characteristic exhaust velocity $c^*$ at sonic throat conditions ($\mathrm{Ma} = 1$) are defined as:
+\begin{equation}
+\dot{m}_{\mathrm{ideal,1D}} = \frac{p_c A_t}{\sqrt{R T_c}} \sqrt{\gamma} \left( \frac{2}{\gamma + 1} \right)^{\frac{\gamma + 1}{2(\gamma - 1)}}, \qquad c^* = \frac{p_c A_t}{\dot{m}_{\mathrm{ideal,1D}}}
+\end{equation}
+In a two-dimensional viscous nozzle, boundary-layer displacement thickness $\delta^*$ and meridional curvature distortion of the sonic line reduce the actual mass flow rate $\dot{m}_{\mathrm{CFD}}$ below $\dot{m}_{\mathrm{ideal,1D}}$, quantified by the discharge coefficient:
+\begin{equation}
+C_d = \frac{\dot{m}_{\mathrm{CFD}}}{\dot{m}_{\mathrm{ideal,1D}}} < 1
+\end{equation}
+
+\subsection{Shifting Chemical Equilibrium vs.\ Frozen Expansion and Sutherland Transport}
+High-temperature $\mathrm{CH_4/O_2}$ combustion products at $T_c = 3434.81\,\mathrm{K}$ contain substantial fractions of dissociated radicals ($\mathrm{CO}, \mathrm{OH}, \mathrm{H_2}, \mathrm{O_2}, \mathrm{H}, \mathrm{O}$). Two limiting thermochemical models bound the expansion process:
+\begin{enumerate}
+    \item \textbf{Frozen Composition Model ($\mathrm{Da} \to 0$):} Species mass fractions remain locked at chamber values ($Y_k(x) = Y_{k,c}$) with no recombination heat release.
+    \item \textbf{Shifting Equilibrium Model ($\mathrm{Da} \to \infty$, Cantera):} At each pressure step $p(x)$ along the isentrope $s(T, p, Y_k) = s_0$, species composition is updated by minimizing mixture Gibbs free energy:
+    \begin{equation}
+    \min_{n_k} G = \sum_{k=1}^{N_{\mathrm{sp}}} n_k \left( \mu_k^\circ(T) + R_u T \ln \frac{p_k}{p^\circ} \right) \quad \text{subject to} \quad \sum_{k=1}^{N_{\mathrm{sp}}} a_{jk} n_k = b_j, \quad s = s_0
+    \end{equation}
+    with exhaust velocity recovered from total enthalpy conservation, $V(x) = \sqrt{2\left[h_0 - h(T(x), Y_k(x))\right]}$.
+\end{enumerate}
+To capture near-wall viscosity and thermal conductivity reduction inside SU2 without full multi-species transport overhead, a two-point Sutherland law is fitted directly to Cantera mixture-averaged viscosities at $T_c$ and $T_w$:
+\begin{equation}
+\mu(T) = \mu_{\mathrm{ref}} \left(\frac{T}{T_{\mathrm{ref}}}\right)^{3/2} \frac{T_{\mathrm{ref}} + S}{T + S}, \qquad k(T) = \frac{\mu(T) c_p}{\mathrm{Pr}}
+\end{equation}
+
+\subsection{Integral Control-Volume Conservation Laws}
+Independently of 1D approximations, integral conservation of mass and axial momentum is verified over the axisymmetric domain $\Omega$:
+\begin{equation}
+\dot{m}(x) = 2\pi \int_{0}^{r_w(x)} \rho u r \, dr, \qquad
+\oint_{\partial \Omega} \left( \rho u (\mathbf{v} \cdot \mathbf{n}) + p n_x - (\boldsymbol{\tau} \cdot \mathbf{n})_x \right) dS = 0
+\end{equation}
+Neglecting the minor axial skin-friction projection relative to pressure forces, global axial equilibrium requires exit vacuum stream thrust to balance inlet stream thrust plus integrated wall axial pressure:
+\begin{equation}
+F_{\mathrm{out,vac}} = F_{\mathrm{in}} + F_{\mathrm{wall},x}
+\end{equation}
+where
+\begin{equation}
+F_{\mathrm{out,vac}} = 2\pi \int_{0}^{R_e} (\rho u^2 + p)_{\mathrm{out}} r \, dr, \quad
+F_{\mathrm{in}} = 2\pi \int_{0}^{R_c} (\rho u^2 + p)_{\mathrm{in}} r \, dr, \quad
+F_{\mathrm{wall},x} = 2\pi \int_{x_{\mathrm{in}}}^{L_d} p_w(x) r_w(x) \frac{dr_w}{dx} \, dx
+\end{equation}
+
+\subsection{ASME V\&V 20 Grid Convergence Index (GCI) Methodology}
+For three systematically refined two-dimensional grids with node counts $N_3 < N_2 < N_1$, effective grid refinement ratios are defined as $r_{32} = \sqrt{N_2/N_3}$ and $r_{21} = \sqrt{N_1/N_2}$. The convergence ratio $R = (f_2 - f_1)/(f_3 - f_2)$ classifies monotonic convergence ($0 < R < 1$), oscillatory convergence ($-1 < R < 0$), or non-asymptotic behavior ($|R| \ge 1$). For monotonic convergence, the apparent order $p$ is solved via fixed-point iteration and capped at the formal second-order scheme accuracy ($p \le 2.0$); the fine-grid GCI and Richardson-extrapolated value $f_{\mathrm{ext}}$ are then given by:
+\begin{equation}
+\mathrm{GCI}_{\mathrm{fine}} = \frac{F_s \, e_a^{21}}{r_{21}^p - 1} \times 100\%, \qquad
+e_a^{21} = \left|\frac{f_1 - f_2}{f_1}\right|, \qquad
+f_{\mathrm{ext}} = \frac{r_{21}^p f_1 - f_2}{r_{21}^p - 1}
+\end{equation}
+using $F_s = 1.25$ for monotonic convergence and conservative $F_s = 3.0$ ($p = 2.0$) for oscillatory or non-asymptotic regimes.
+
+\subsection{Bartz Empirical Convective Heat Transfer Correlation}
+The Bartz correlation adapts Colburn's turbulent pipe-flow analogy ($\mathrm{Nu} = 0.026\,\mathrm{Re}^{0.8}\,\mathrm{Pr}^{0.4}$) to accelerating compressible nozzle boundary layers through the film-temperature correction factor $\sigma(x)$:
+\begin{equation}
+h_g(x) = \left[ \frac{0.026}{D_t^{0.2}} \left( \frac{\mu_c^{0.2} c_p}{\mathrm{Pr}^{0.6}} \right) \left( \frac{p_c}{c^*} \right)^{0.8} \right] \left( \frac{A_t}{A(x)} \right)^{0.9} \sigma(x)
+\end{equation}
+\begin{equation}
+\sigma(x) = \left[ \frac{1}{2} \frac{T_w}{T_c} \left( 1 + \frac{\gamma - 1}{2} \mathrm{Ma}(x)^2 \right) + \frac{1}{2} \right]^{-0.68} \left( 1 + \frac{\gamma - 1}{2} \mathrm{Ma}(x)^2 \right)^{-0.12}
+\end{equation}
+Wall heat flux is driven by the adiabatic recovery temperature $T_{\mathrm{aw}}(x)$ ($r_{\mathrm{rec}} = \mathrm{Pr}^{1/3}$):
+\begin{equation}
+q_{\mathrm{Bartz}}(x) = h_g(x) \left( T_{\mathrm{aw}}(x) - T_w \right), \qquad T_{\mathrm{aw}}(x) = T_c \, \frac{1 + r_{\mathrm{rec}} \frac{\gamma - 1}{2} \mathrm{Ma}(x)^2}{1 + \frac{\gamma - 1}{2} \mathrm{Ma}(x)^2}
+\end{equation}
+
+\subsection{Schmucker and Summerfield Flow Separation Criteria}
+In overexpanded sea-level operation ($p_e < p_a$), adverse ambient pressure gradients induce oblique shock formation and boundary-layer separation:
+\begin{enumerate}
+    \item \textbf{Summerfield Criterion:} Approximates incipient separation pressure as $p_{\mathrm{sep}} \approx (0.35\text{--}0.40)\,p_a$.
+    \item \textbf{Schmucker Criterion:} Accounts for higher boundary-layer momentum at larger local Mach numbers $\mathrm{Ma}_{\mathrm{sep}}$ upstream of the shock foot:
+    \begin{equation}
+    \frac{p_{\mathrm{sep}}}{p_a} = \left( 1.88\,\mathrm{Ma}_{\mathrm{sep}} - 1 \right)^{-0.64}
+    \end{equation}
+\end{enumerate}
+
+\subsection{1D Counter-Flow Regenerative Cooling and Hydraulic Formulation}
+Along $N_{\mathrm{ch}}$ variable-geometry rectangular channels of local width $w_{\mathrm{ch}}(x)$, height $h_{\mathrm{ch}}(x)$, circumferential pitch $s_p(x) = 2\pi(r(x) + t_{\mathrm{Cu}})/N_{\mathrm{ch}}$, rib thickness $t_{\mathrm{rib}}(x) = s_p(x) - w_{\mathrm{ch}}(x)$, hydraulic diameter $D_h = \frac{2 w_{\mathrm{ch}} h_{\mathrm{ch}}}{w_{\mathrm{ch}} + h_{\mathrm{ch}}}$, and mass flux $G_{\mathrm{ch}} = \dot{m}_{\mathrm{CH_4}} / (N_{\mathrm{ch}} w_{\mathrm{ch}} h_{\mathrm{ch}})$, supercritical methane properties ($\rho, c_p, \mu, k_f$) are interpolated locally from a NIST 50-bar reference table (with pressure-scaled density and optional CoolProp evaluation). The Darcy friction factor $f_D$ for milled surface roughness $\varepsilon_r$ is computed from the explicit Haaland equation, feeding both the Gnielinski Nusselt correlation and copper rib fin efficiency $\eta_f$:
+\begin{equation}
+\frac{1}{\sqrt{f_D}} = -1.8 \log_{10}\!\left[\left(\frac{\varepsilon_r}{3.7 D_h}\right)^{1.11} + \frac{6.9}{\mathrm{Re}}\right], \qquad
+\mathrm{Nu} = \frac{(f_D/8)(\mathrm{Re} - 1000)\,\mathrm{Pr}}{1 + 12.7\sqrt{f_D/8}\left(\mathrm{Pr}^{2/3} - 1\right)}
+\end{equation}
+\begin{equation}
+h_c = \frac{\mathrm{Nu}\,k_f}{D_h}, \qquad
+m_{\mathrm{fin}} = \sqrt{\frac{2 h_c}{k_{\mathrm{Cu}} t_{\mathrm{rib}}}}, \qquad
+\eta_f = \frac{\tanh(m_{\mathrm{fin}} h_{\mathrm{ch}})}{m_{\mathrm{fin}} h_{\mathrm{ch}}}, \qquad
+h_{c,\mathrm{eff}} = h_c \, \frac{w_{\mathrm{ch}} + 2\eta_f h_{\mathrm{ch}}}{s_p}
+\end{equation}
+Marching counter-flow from the exit manifold ($T_{\mathrm{cool,in}} = 120.0\,\mathrm{K}$, $p_{\mathrm{cool,in}} = 60.0\,\mathrm{bar}$) to the chamber inlet yields axial temperature and static pressure distributions accounting for both Darcy-Weisbach friction and differential flow acceleration:
+\begin{equation}
+T_{\mathrm{cool},i-1} = T_{\mathrm{cool},i} + \frac{q_i \, 2\pi r_i \Delta s}{\dot{m}_{\mathrm{CH_4}} c_{p,i}}, \qquad
+p_{\mathrm{cool},i-1} = p_{\mathrm{cool},i} - f_D \frac{\Delta s}{D_h} \frac{G_{\mathrm{ch},i}^2}{2\rho_i} - \frac{\rho_i + \rho_{i-1}}{2}\frac{v_{i-1}^2 - v_i^2}{2}
+\end{equation}
+\begin{equation}
+T_{w,\mathrm{cold}} = T_{\mathrm{cool}} + \frac{q}{h_{c,\mathrm{eff}}}, \qquad
+T_{w,\mathrm{hot}} = T_{w,\mathrm{cold}} + \frac{q \, t_{\mathrm{Cu}}}{k_{\mathrm{Cu}}}
+\end{equation}
+
+\subsection{Analytical Shell Theories: Lam\'e, Laplace-Young, and Lorenz-Timoshenko}
+Three analytical solid-mechanics benchmarks verified the linear elastic regime of the FEA module:
+\begin{enumerate}
+    \item \textbf{Lam\'e Thick-Walled Cylinder Theory (1D):} Treats each station as an independent ring ($\frac{dr}{dx} = 0$), neglecting meridional curvature and axial load transfer ($28.49\%$ error):
+    \begin{equation}
+    \sigma_\theta^{\mathrm{Lam\acute{e}}} = \Delta p \, \frac{r_i^2 + r_o^2}{r_o^2 - r_i^2}, \qquad \sigma_r^{\mathrm{Lam\acute{e}}} = -\Delta p, \qquad \sigma_z^{\mathrm{Lam\acute{e}}} = 0
+    \end{equation}
+    \item \textbf{Laplace-Young Doubly-Curved Membrane Shell Theory (2D):} Incorporates wall slope $\tan\alpha = \frac{dr}{dx}$, circumferential normal radius $R_2 = r/\cos\alpha$, and meridional radius $R_1 = -\left[1 + (dr/dx)^2\right]^{3/2} / (d^2r/dx^2)$ ($2.54\%$ error):
+    \begin{equation}
+    \sigma_\phi^{\mathrm{mech}}(x) = \frac{\int_{x}^{L_d} -2\pi r \Delta p \frac{dr}{dx}\,dx}{2\pi r t \cos\alpha}, \qquad \frac{\sigma_\phi^{\mathrm{mech}}}{R_1} + \frac{\sigma_\theta^{\mathrm{mech}}}{R_2} = \frac{\Delta p}{t}
+    \end{equation}
+    \item \textbf{Lorenz-Timoshenko Thermo-Elastic Shell Theory:} Accounts for constrained equibiaxial thermal bending induced by through-thickness temperature difference $\Delta T(x) = q(x) t / k_s$ ($2.17\%$ error):
+    \begin{equation}
+    \sigma_\phi^{\mathrm{th}} = \sigma_\theta^{\mathrm{th}} = \mp \frac{E \alpha_{\mathrm{th}} \Delta T(x)}{2(1 - \nu)}, \qquad
+    \sigma_{\mathrm{VM}} = \sqrt{\frac{1}{2} \left[ (\sigma_\theta - \sigma_\phi)^2 + (\sigma_\phi - \sigma_r)^2 + (\sigma_r - \sigma_\theta)^2 \right]}
+    \end{equation}
+\end{enumerate}
+
+\subsection{\texttt{CAX4} Finite Element Formulation, Plasticity, and Stress Extraction}
+In CalculiX, each four-node bilinear axisymmetric continuum element (\texttt{CAX4}) in the $(r, z)$ plane is internally expanded into a $2^\circ$ circumferential sector of an eight-node three-dimensional hexahedral element (\texttt{C3D8}) with multi-point symmetry constraints enforcing $u_\theta = 0$ and $\frac{\partial(\cdot)}{\partial \theta} = 0$.
+
+For linear elastic verification of a monolithic $4.0\,\mathrm{mm}$ shell subdivided into $N_L = 4$ layers, nodal stresses averaged from element Gauss centroids place the innermost node ($j = 0$) at normalized depth $\xi_0 = \frac{1}{2 N_L} = 0.125$ ($0.375\,\Delta T$ instead of $0.500\,\Delta T$, a $25.0\%$ offset), while node $j = 1$ lies at $\xi_1 = 0.250$. True elastic inner-surface stresses were recovered via two-point linear tensor extrapolation:
+\begin{equation}
+\boldsymbol{\sigma}_{\mathrm{wall}}(\xi = 0) = 2\,\boldsymbol{\sigma}_{j=0}(\xi_0 = 0.125) - \boldsymbol{\sigma}_{j=1}(\xi_1 = 0.250)
+\end{equation}
+
+In the final bimetallic elastoplastic model ($4\times\mathrm{CAX4}$ $\mathrm{CuCrZr}$ layers of $0.25\,\mathrm{mm}$ each + $2\times\mathrm{CAX4}$ Inconel 718 layers of $1.5\,\mathrm{mm}$ each), $\mathrm{CuCrZr}$ obeys temperature-dependent $J_2$ von Mises plasticity with isotropic hardening ($R_{p0.2} = 310, 240, 165, 95\,\mathrm{MPa}$ at $300, 600, 800, 1000\,\mathrm{K}$, respectively). Because linear extrapolation overshoots the yield plateau across elastic-plastic zone boundaries, stresses and Equivalent Plastic Strain ($\mathrm{PEEQ}$) in the nonlinear bimetallic model are extracted directly from the fine $0.25\,\mathrm{mm}$ inner-liner layer ($j = 0$), and low-cycle fatigue life $N_f$ is estimated using the Coffin-Manson plastic strain-life relation $\frac{\Delta\varepsilon_p}{2} = \varepsilon_f' (2 N_f)^c$.
+
+\end{document}

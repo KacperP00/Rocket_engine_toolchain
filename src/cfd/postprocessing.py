@@ -40,7 +40,7 @@ def generate_geometry_and_contour_plots(df_vol, df_wall, results_dir):
     dr_dx = np.gradient(yw, xw)
     cos_a = 1.0 / np.sqrt(1.0 + dr_dx**2)
     sin_a = dr_dx * cos_a
-    t_wall = getattr(config, 'WALL_THICKNESS', 0.004)
+    t_wall = getattr(config, 'LINER_THICKNESS', 0.001) + getattr(config, 'JACKET_THICKNESS', 0.003)
     xw_out = xw - t_wall * sin_a
     yw_out = yw + t_wall * cos_a
 
@@ -48,7 +48,7 @@ def generate_geometry_and_contour_plots(df_vol, df_wall, results_dir):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     ax1.fill_between(xw, 0, yw, color='#e6f2ff', alpha=0.6, label='Fluid Domain (CH4/O2 Products)')
     ax1.fill(np.concatenate([xw, xw_out[::-1]]), np.concatenate([yw, yw_out[::-1]]),
-             color='#d95f02', alpha=0.85, label=f'CuCrZr Liner Shell (t = {t_wall*1000:.1f} mm)')
+             color='#d95f02', alpha=0.85, label='Bimetallic Wall (CuCrZr 1.0 mm + Inconel 718 3.0 mm)')
     ax1.plot(xw, yw, 'r-', linewidth=2.0, label='MARKER_WALL (Isothermal T_w = 800 K)')
     ax1.plot([xw.min(), xw.min()], [0.0, yw[0]], 'g-', linewidth=3.0, label='MARKER_INLET')
     ax1.plot([xw.max(), xw.max()], [0.0, yw[-1]], 'm-', linewidth=3.0, label='MARKER_OUTLET')
@@ -64,7 +64,7 @@ def generate_geometry_and_contour_plots(df_vol, df_wall, results_dir):
     ax2.plot(xw, yw, 'k-', linewidth=1.2)
     ax2.set_xlabel('Axial Coordinate x [m]')
     ax2.set_ylabel('Radial Coordinate r [m]')
-    ax2.set_title(f'Computational Grid ({len(df_vol)} Nodes, Structured Boundary Layer dy_1 = 1.5 um)')
+    ax2.set_title(f'Computational Grid ({len(df_vol):,} Nodes, Structured Boundary Layer dy_1 = 0.35 um)')
     ax2.set_ylim(-0.005, yw.max() + 0.015)
     ax2.grid(True, ls='--', alpha=0.5)
 
